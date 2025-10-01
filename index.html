@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Portland Water Meter Finder</title>
+  <link rel="preconnect" href="https://js.arcgis.com" crossorigin>
+  <style>
+    :root{--bg:#0b1220;--panel:#111a2b;--muted:#8aa0bd;--text:#e8eefc;--accent:#22d3ee;--accent2:#2dd4bf;--danger:#ef4444}
+    html,body,#app{height:100%;margin:0;background:var(--bg);color:var(--text);font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    #app{display:grid;grid-template-columns:360px 1fr}
+    .left{border-right:1px solid #1b2942;display:flex;flex-direction:column}
+    .panel{padding:14px;background:var(--panel)}
+    h1{font-size:18px;margin:0 0 6px}
+    .muted{color:var(--muted)}
+    input,button,select{height:38px;border-radius:10px;border:1px solid #20314f;background:#0e1626;color:var(--text);padding:0 10px}
+    button{cursor:pointer}
+    button.primary{background:linear-gradient(135deg,#35e0cd,#18b8a2);border:none;color:#062521;font-weight:700}
+    button.ghost{background:#0e1626}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .row{display:flex;gap:8px}
+    .stack{display:grid;gap:8px}
+    .section{border-top:1px solid #1b2942;margin-top:12px;padding-top:12px}
+    #list{overflow:auto;max-height:35vh;border:1px solid #1b2942;border-radius:12px}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{border-bottom:1px solid #1b2942;text-align:left;padding:8px}
+    tr:hover{background:#0c1424}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid #1b2942;color:#a6b3cc}
+    .kbd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#0e1626;border:1px solid #20314f;border-radius:6px;padding:1px 6px}
+    #viewDiv{position:relative}
+    .toast{position:fixed;bottom:16px;right:16px;padding:10px 12px;border-radius:12px;background:#0e1626;border:1px solid #20314f;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    details summary{cursor:pointer}
+  </style>
+</head>
+<body>
+<div id="app">
+  <!-- LEFT PANEL -->
+  <div class="left">
+    <div class="panel">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <h1 style="margin:0">Portland Water Meter Finder</h1>
+          <span class="pill">Public</span>
+        </div>
+        <button id="btnHelp" class="ghost" title="Help">Help</button>
+      </div>
+      <div class="muted" style="margin-top:6px">Search by account or address, click a meter, or draw a box. Edit account # or flag for review.</div>
+
+      <div class="section stack">
+        <div class="row">
+          <input id="q" placeholder="Search account # or address" style="flex:1"/>
+          <button id="btnSearch" class="ghost">Search</button>
+        </div>
+        <div class="row">
+          <button id="btnDraw" class="ghost" title="Draw rectangle to select">Draw box</button>
+          <button id="btnExtent" class="ghost" title="Select all meters in current view">Select visible</button>
+          <button id="btnClear" class="ghost">Clear</button>
+          <button id="btnCsv" class="ghost" title="Export selected rows to CSV">Export CSV</button>
+        </div>
+        <div id="list"></div>
+      </div>
+
+      <div class="section stack" id="detail" style="display:none">
+        <div class="muted">Selected meter</div>
+        <div>OID: <span id="oid" class="kbd">—</span></div>
+        <div>Account #: <span id="acct" class="kbd">—</span></div>
+        <div>Address: <span id="addr" class="kbd">—</span></div>
+        <div class="row">
+          <input id="newAcct" placeholder="New account number" style="flex:1" />
+          <button id="btnUpdate" class="primary">Update</button>
+        </div>
+        <div class="row">
+          <button id="btnFlag" class="ghost" title="Toggle Needs_Review">Toggle Review Flag</button>
+          <button id="btnZoom" class="ghost">Zoom to feature</button>
+        </div>
+      </div>
+
+      <details class="section">
+        <summary class="muted">Settings</summary>
+        <div class="stack" style="margin-top:8px">
+          <div><span class="muted">Service:</span> <span class="kbd">https://services3.arcgis.com/DAf01WuIltSLujAv/arcgis/rest/services/Portland_Water_Meters__UBO_Version/FeatureServer</span></div>
+          <label>Account # field <input id="accountField" value="Customer_Account_Number" style="width:100%"></label>
+          <div class="muted" style="font-size:12px">If your schema differs, change the field name here.</div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- MAP PANEL -->
+  <div id="viewDiv"></div>
+</div>
+
+<div id="toast" class="toast" style="display:none"></div>
+
+<script src="https://js.arcgis.com/4.30/"></script>
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    q: $('#q'), btnSearch: $('#btnSearch'), btnClear: $('#btnClear'), btnDraw: $('#btnDraw'),
+    btnExtent: $('#btnExtent'), btnCsv: $('#btnCsv'), list: $('#list'), detail: $('#detail'),
+    oid: $('#oid'), acct: $('#acct'), addr: $('#addr'), newAcct: $('#newAcct'), btnUpdate: $('#btnUpdate'),
+    btnZoom: $('#btnZoom'), btnFlag: $('#btnFlag'), accountField: $('#accountField'), btnHelp: $('#btnHelp')
+  };
+  const toast = (msg)=>{ const t=$('#toast'); t.textContent=msg; t.style.display='block'; clearTimeout(t._t); t._t=setTimeout(()=>t.style.display='none', 2600); };
+
+  els.accountField.value = localStorage.meter_acct || 'Customer_Account_Number';
+  els.accountField.addEventListener('change', ()=>{ localStorage.meter_acct = els.accountField.value.trim(); });
+
+  require([
+    'esri/Map','esri/views/MapView','esri/layers/FeatureLayer','esri/widgets/Search',
+    'esri/layers/GraphicsLayer','esri/widgets/Sketch','esri/request'
+  ], function(Map,MapView,FeatureLayer,Search,GraphicsLayer,Sketch,esriRequest){
+
+    const map = new Map({ basemap: 'arcgis-topographic' });
+    const view = new MapView({ container: 'viewDiv', map, center: [-97.323, 27.877], zoom: 13 });
+
+    const drawLayer = new GraphicsLayer();
+    map.add(drawLayer);
+    const sketch = new Sketch({ view, layer: drawLayer, creationMode: 'single', availableCreateTools: ['rectangle'] });
+    sketch.visible = false; view.ui.add(sketch, 'top-left');
+
+    const searchWidget = new Search({ view }); view.ui.add(searchWidget, 'top-right');
+
+    const serviceRoot = 'https://services3.arcgis.com/DAf01WuIltSLujAv/arcgis/rest/services/Portland_Water_Meters__UBO_Version/FeatureServer';
+    let fl=null, lv=null, highlight=null, selection=[], objIdField='OBJECTID';
+
+    function acctField(){ return (els.accountField.value||'Customer_Account_Number').trim(); }
+    function addrFromAttrs(a){ return a.Service_Address || a.Address || a.FullAddres || a.SiteAddress || a.SITEADD || ''; }
+    function acctFromAttrs(a){ return a[acctField()] || a.Customer_Account_Number || a.Account || ''; }
+    function clearSelection(){ selection=[]; if(highlight){highlight.remove();highlight=null;} drawLayer.removeAll(); els.list.innerHTML=''; els.detail.style.display='none'; }
+
+    function renderList(features){
+      if(!features.length){ els.list.innerHTML = '<div class="muted" style="padding:8px">No matches.</div>'; return; }
+      const rows = features.map(f=>{
+        const a=f.attributes; const oid=a[objIdField];
+        const acct=acctFromAttrs(a) || '—'; const addr=addrFromAttrs(a) || '—';
+        return `<tr data-oid="${oid}"><td>${oid}</td><td>${acct}</td><td>${addr}</td></tr>`;
+      }).join('');
+      els.list.innerHTML = `<div style="max-height:35vh;overflow:auto;border-radius:12px"><table><thead><tr><th>OID</th><th>Account</th><th>Address</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      els.list.querySelectorAll('tbody tr').forEach(tr=>{
+        tr.addEventListener('click', async ()=>{
+          const oid = +tr.getAttribute('data-oid');
+          const q = fl.createQuery(); q.where = objIdField + ' = ' + oid; q.returnGeometry = true; q.outFields = ['*'];
+          const { features } = await fl.queryFeatures(q);
+          if(features.length){ selectFeature(features[0]); }
+        });
+      });
+    }
+
+    function showDetail(f){
+      const a = f.attributes; els.oid.textContent = a[objIdField]; els.acct.textContent = acctFromAttrs(a) || '—'; els.addr.textContent = addrFromAttrs(a) || '—';
+      els.newAcct.value = acctFromAttrs(a) || ''; els.detail.style.display = 'block';
+    }
+
+    function selectFeature(f){
+      selection = [f];
+      if(highlight){ highlight.remove(); }
+      if(lv){ highlight = lv.highlight([ f.attributes[objIdField] ]); }
+      showDetail(f);
+      if(f.geometry){ view.goTo({ target:f.geometry, scale: 1500 }).catch(()=>{}); }
+    }
+
+    async function selectByGeometry(geometry){
+      const q = fl.createQuery(); q.geometry = geometry; q.spatialRelationship = 'intersects'; q.returnGeometry = false; q.outFields=['*'];
+      const { features } = await fl.queryFeatures(q);
+      selection = features;
+      if(highlight){ highlight.remove(); }
+      if(lv){ highlight = lv.highlight(features.map(ft=> ft.attributes[objIdField])); }
+      renderList(features);
+      toast(features.length + ' feature(s) selected.');
+    }
+
+    async function selectByExtent(){
+      const q = fl.createQuery(); q.geometry = view.extent; q.spatialRelationship = 'intersects'; q.returnGeometry = false; q.outFields=['*'];
+      const { features } = await fl.queryFeatures(q);
+      selection = features;
+      if(highlight){ highlight.remove(); }
+      if(lv){ highlight = lv.highlight(features.map(ft=> ft.attributes[objIdField])); }
+      renderList(features);
+      toast(features.length + ' feature(s) in view.');
+    }
+
+    async function runTextSearch(){
+      if(!fl){ toast('Layer not ready yet.'); return; }
+      const t = (els.q.value||'').trim(); if(!t){ toast('Type a search.'); return; }
+      const fields = [acctField(),'Customer_Account_Number','Account','Service_Address','Address','FullAddres'];
+      const esc = t.replace(/'/g, "''");
+      const where = fields.map(f=> `(${f} LIKE '%${esc}%')`).join(' OR ');
+      const q = fl.createQuery(); q.where = where; q.outFields=['*']; q.returnGeometry=false;
+      const { features } = await fl.queryFeatures(q);
+      selection = features;
+      if(highlight){ highlight.remove(); }
+      if(lv){ highlight = lv.highlight(features.map(ft=> ft.attributes[objIdField])); }
+      renderList(features);
+      if(features[0]){ showDetail(features[0]); }
+    }
+
+    async function updateAccount(){
+      if(!fl || !selection.length){ toast('Select a feature first.'); return; }
+      const val = (els.newAcct.value||'').trim(); if(!val){ toast('Enter a new account number.'); return; }
+      const oid = selection[0].attributes[objIdField];
+      const edits = { updateFeatures: [{ attributes: Object.assign({}, { [objIdField]: oid, [acctField()]: val }) }] };
+      try{
+        const res = await fl.applyEdits(edits);
+        const ok = res && res.updateFeatureResults && res.updateFeatureResults[0] && !res.updateFeatureResults[0].error;
+        if(ok){
+          selection[0].attributes[acctField()] = val; els.acct.textContent = val; toast('Account updated.');
+        } else { toast('Update failed. Check permissions/field.'); }
+      }catch(e){ console.error(e); toast('Update failed (network/permission).'); }
+    }
+
+    async function toggleReview(){
+      if(!fl || !selection.length){ toast('Select a feature first.'); return; }
+      const a = selection[0].attributes; const oid = a[objIdField];
+      const cur = (a.Needs_Review === true || a.Needs_Review === 'Yes' || a.Needs_Review === 'Y') ? 'Yes' : 'No';
+      const next = cur === 'Yes' ? 'No' : 'Yes';
+      const edits = { updateFeatures: [{ attributes: { [objIdField]: oid, Needs_Review: next } }] };
+      try{
+        const res = await fl.applyEdits(edits);
+        const ok = res && res.updateFeatureResults && res.updateFeatureResults[0] && !res.updateFeatureResults[0].error;
+        if(ok){ selection[0].attributes.Needs_Review = next; toast('Needs_Review: ' + next); }
+        else { toast('Could not toggle review flag.'); }
+      }catch(e){ console.error(e); toast('Update failed.'); }
+    }
+
+    function toCSV(features){ if(!features.length) return '';
+      const cols = [objIdField, acctField(), 'Customer_Account_Number','Account','Service_Address','Address','FullAddres'];
+      const header = cols.join(',');
+      const rows = features.map(f=> cols.map(c=> JSON.stringify(f.attributes[c] ?? '')).join(',')).join('\n');
+      return header + '\n' + rows;
+    }
+    function download(filename, text){ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([text],{type:'text/csv'})); a.download=filename; a.click(); }
+
+    async function chooseLayerFromService(){
+      try{
+        const info = await esriRequest(serviceRoot, { query: { f:'json' }, responseType:'json' });
+        const layers = (info.data.layers||[]).filter(l=> l && typeof l.id==='number');
+        let chosen = layers.find(l=> /meter/i.test(l.name||'')) || layers[0];
+        if(!chosen) throw new Error('No layers found in service.');
+        return serviceRoot + '/' + chosen.id;
+      }catch(e){ console.error(e); toast('Could not load service layers.'); return null; }
+    }
+
+    async function init(){
+      const layerUrl = await chooseLayerFromService();
+      if(!layerUrl) return;
+      fl = new FeatureLayer({ url: layerUrl, outFields:['*'], popupEnabled: true });
+      map.add(fl);
+      await fl.when(); objIdField = fl.objectIdField || 'OBJECTID';
+      lv = await view.whenLayerView(fl);
+      searchWidget.sources = [{
+        layer: fl, name: 'Meters',
+        searchFields: [acctField(),'Customer_Account_Number','Account','Service_Address','Address','FullAddres'],
+        displayField: acctField(), outFields:['*'],
+        suggestionTemplate: '{' + acctField() + '} — {' + (fl.displayField || 'Service_Address') + '}',
+        minSuggestCharacters: 2, placeholder: 'Search meters'
+      }];
+      toast('Layer ready. You can search or draw a box.');
+    }
+
+    // Wire UI
+    els.btnSearch.addEventListener('click', runTextSearch);
+    els.btnClear.addEventListener('click', clearSelection);
+    els.btnDraw.addEventListener('click', ()=>{ sketch.visible = true; sketch.create('rectangle'); });
+    els.btnExtent.addEventListener('click', selectByExtent);
+    els.btnCsv.addEventListener('click', ()=>{ if(selection.length) download('meters.csv', toCSV(selection)); else toast('Nothing selected.'); });
+    els.btnUpdate.addEventListener('click', updateAccount);
+    els.btnZoom.addEventListener('click', ()=>{ if(selection[0]?.geometry) view.goTo({ target: selection[0].geometry, scale: 1500 }); });
+    els.btnFlag.addEventListener('click', toggleReview);
+    sketch.on('create', (e)=>{ if(e.state==='complete'){ selectByGeometry(e.graphic.geometry); sketch.visible=false; drawLayer.removeAll(); } });
+    view.on('click', async (evt)=>{ if(!fl) return; const hit = await view.hitTest(evt, { include:[fl] }); const g = hit?.results?.find(r=> r.graphic && r.graphic.layer===fl)?.graphic;
+      if(g){ const q=fl.createQuery(); q.where=objIdField+' = '+g.attributes[objIdField]; q.outFields=['*']; q.returnGeometry=true;
+        const { features } = await fl.queryFeatures(q); if(features[0]){ selectFeature(features[0]); renderList(features); } } });
+
+    els.btnHelp.addEventListener('click', ()=>{
+      alert('How to use:\n\n1) Search by account or address, or use Draw box / Select visible.\n2) Click a row or feature to focus.\n3) Edit the account # or toggle Needs_Review.\n4) Export selection to CSV if needed.');
+    });
+
+    init();
+  });
+})();
+</script>
+</body>
+</html>
